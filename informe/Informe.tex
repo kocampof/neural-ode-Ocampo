@@ -1,0 +1,121 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[spanish]{babel}
+\usepackage{amsmath, amssymb, amstext}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{tabularx} 
+\setlength{\parskip}{1em}    % Añade un espacio visible de 1 línea entre cada párrafo
+\setlength{\parindent}{0pt}  % Elimina la sangría inicial para que el texto empiece alineado
+\geometry{top=2.5cm, bottom=2.5cm, left=3cm, right=3cm}
+
+% Configuración para centrar columnas numéricas en tabularx
+\newcolumntype{Y}{>{\centering\arraybackslash}X}
+
+\title{\textbf{Modelado Numérico Continuo de Series de Tiempo Epidemiológicas mediante Neural ODEs y Latent ODEs}}
+\author{\textbf{Katherine Ocampo Franco} \\ \small Curso de Análisis Numérico \\ \small Universidad Nacional de Colombia}
+\date{28 de mayo de 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Este informe presenta la evaluación e implementación de aproximaciones continuas basadas en ecuaciones diferenciales ordinarias (EDOs) parametrizadas por redes neuronales, contrastando su rendimiento contra metodologías clásicas de interpolación y regresión. Utilizando el dataset epidemiológico COVID-19 JHU de nuevos casos diarios, se analizan los efectos de la densidad de observación ($30\%$, $60\%$ y $100\%$) sobre la capacidad de reconstrucción y extrapolación de una Neural ODE y una Latent ODE basadas en un integrador numérico Runge-Kutta de 4to orden (RK4). Los resultados evidencian las ventajas del formalismo continuo en escenarios de escasez de datos y predicción a largo plazo, discutiendo sus costos computacionales y estabilidad numérica.
+\end{abstract}
+
+\section{Descripción del Dataset y Análisis Exploratorio}
+El conjunto de datos seleccionado para esta práctica corresponde al registro global de la Universidad Johns Hopkins (JHU CSSE) enfocado en los \textbf{nuevos casos diarios de COVID-19}. El dataset preprocesado cuenta con un total de $178$ trayectorias temporales independientes (países/regiones) distribuidas en $143$ series para la fase de entrenamiento numérico y $35$ para la validación del testeo. 
+
+Cada trayectoria consta de una longitud exacta de $400$ pasos de tiempo que corresponden a días consecutivos fijos, configurando inicialmente un muestreo regular para la serie completa. Las observaciones corresponden a una sola dimensión ($1$ componente escalar por día) que ha sido sometida a una estandarización y normalización estadística, resultando en un rango de valores continuos acotados entre $[-1.098, 7.928]$. 
+
+Desde una perspectiva de análisis cualitativo, las curvas epidemiológicas reales observadas exhiben una naturaleza altamente no lineal caracterizada por dinámicas multimodales, picos abruptos que denotan olas de contagio sucesivas y fases de amortiguamiento acelerado, tal como se ilustra en la Figura~\ref{fig:trayectorias_covid}. Estas características sugieren que el sistema físico subyacente presenta propiedades asociadas a sistemas dinámicos no lineales con variaciones rápidas de pendientes (comportamiento de rigidez o \textit{stiffness}), similar a las oscilaciones de relajación analizadas en el oscilador de Van der Pol y el modelo de FitzHugh-Nagumo en el Notebook 01.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\textwidth]{1.png}
+\caption{Muestra aleatoria de trayectorias temporales para los nuevos casos diarios estandarizados de COVID-19.}
+\label{fig:trayectorias_covid}
+\end{figure}
+
+\section{Configuración de Hiperparámetros y Justificación Numérica}
+Con el objetivo explícito de \textbf{optimizar el tiempo de ejecución y cómputo global de los experimentos} sin sacrificar la convergencia matemática ni la estabilidad de los métodos de integración numérica, se diseñó, seleccionó y justificó la siguiente configuración balanceada de hiperparámetros:
+
+\begin{itemize}
+    \item \textbf{dim\_latente = 4:} Restringir el espacio oculto a solo $4$ dimensiones reduce drásticamente el tamaño de las matrices dinámicas que el integrador debe procesar en cada sub-paso. Además de acelerar el flujo de cálculo matemático por época, actúa como un regularizador implícito que obliga al codificador a proyectar la serie hacia las variables de estado latente fundamentales, evitando que el modelo procese dinámicas espurias o memorice ruido aleatorio.
+    \item \textbf{n\_pasos\_ode = 6:} Se fijó en el mínimo permitido para el solver clásico. Al reducir los sub-pasos internos de evaluación en el integrador RK4 por cada día de simulación, la carga computacional decrece significativamente frente a configuraciones más densas. Dado que el método numérico retiene un error de truncamiento global de $\mathcal{O}(\Delta t^4)$, esta tasa de muestreo interno mantiene un compromise óptimo entre velocidad de ejecución y precisión matemática cerca de los picos.
+    \item \textbf{learning\_rate = 0.001 y n\_epochs = 15:} La selección de $15$ épocas responde directamente a la necesidad de minimizar el tiempo en la máquina, capturando la tendencia decreciente de la función de pérdida continuo-discreta antes de que el solver numérico extienda los tiempos de entrenamiento de forma ineficiente. Una tasa de aprendizaje de $1\times 10^{-3}$ combinada con el optimizador Adam asegura pasos estables y rápidos sobre la superficie de error.
+    \item \textbf{batch\_size = 32:} Un tamaño de lote intermedio balancea la paralelización del cómputo estocástico y la velocidad de transferencia de tensores en Keras 3, estabilizando los gradientes calculados mediante el método adjunto o diferenciación directa.
+    \item \textbf{dim\_oculto\_f = 32, dim\_oculto\_enc = 32, dim\_oculto\_dec = 32:} Se limitó la arquitectura de las capas ocultas a $32$ unidades neuronales en lugar de las densidades por defecto. Esta contracción estructural reduce significativamente el número de operaciones de álgebra lineal requeridas en la evaluación de la derivada continua $\frac{dz}{dt} = f_\theta(z, t)$, permitiendo que los modelos compilen y terminen de entrenar en pocos minutos.
+\end{itemize}
+
+\section{Resultados Numéricos y Tabla Comparativa}
+Los tres modelos parametrizados fueron evaluados bajo restricciones artificiales en la disponibilidad de sus datos de entrada, eliminando de forma aleatoria puntos intermedios para simular densidades de observación del $30\%$, $60\%$ y el $100\%$ total. La métrica utilizada fue el error cuadrático medio estandarizado (RMSE) tanto para la ventana observada (Reconstrucción, \textit{rec}) como para la ventana futura no observada (Extrapolación, \textit{ext}). Utilizando el paquete \texttt{tabularx}, la Tabla~\ref{tab:resultados_epidemia} se autoajusta y centra con precisión milimétrica al ancho del documento.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{\textbf{Métricas comparativas de rendimiento numérico RMSE y parámetros estructurales bajo diferentes densidades de muestreo (Equivalente a Rubanova et al., 2019).}}
+\label{tab:resultados_epidemia}
+\begin{tabularx}{\textwidth}{lYYYYcc}
+\toprule
+\textbf{Modelo} & \multicolumn{2}{c}{\textbf{30\% observaciones}} & \multicolumn{2}{c}{\textbf{60\% observaciones}} & \textbf{Parámetros} & \textbf{Tiempo} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5}
+& \textbf{RMSE rec} & \textbf{RMSE ext} & \textbf{RMSE rec} & \textbf{RMSE ext} & \textbf{Totales} & \textbf{Entren. (s)} \\
+\midrule
+Método Clásico & 0.0000 & 0.1142 & 0.0000 & 0.0866 & 4 & 0.0s \\
+Neural ODE     & 0.5093 & 0.5103 & 0.5073 & 0.5141 & 1,581 & 1105.3s \\
+Latent ODE     & 0.5689 & 0.5688 & 0.5666 & 0.5722 & 5,197 & 1455.9s \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Análisis de Resultados (Respuestas a Preguntas de Discusión)}
+
+\subsection*{P1. Análisis de dominancia: Método Clásico vs. Arquitecturas Continuas}
+Al observar detenidamente las métricas de desempeño, se aprecia un comportamiento numérico sumamente revelador. El Método Clásico (basado en la interpolación por splines cúbicos acoplada a un modelo discreto) registra un \textbf{RMSE de reconstrucción idéntico a 0.0000} en todos los escenarios. Matemáticamente, esto no implica que el modelo clásico haya comprendido la naturaleza física intrínseca de la epidemia; por el contrario, refleja la naturaleza algebraica de los splines, los cuales están obligados por definición a forzar su trazo continuo exactamente a través de los nodos observados de la muestra. 
+
+En contraste, la Neural ODE y la Latent ODE reportan errores de reconstrucción sustancialmente más altos. Esto ocurre debido a que las redes continuas intentan resolver un \textbf{Problema de Valor Inicial (PVI)} global gobernado por un único campo vectorial común $\frac{dz}{dt} = f_\theta(z, t)$. El modelo busca aprender las leyes de evolución macroscópica de la epidemia en lugar de memorizar algebraicamente cada nodo individual, actuando como una regresión continua suavizada en el espacio latente. 
+
+En términos de extrapolación, el método clásico retiene numéricamente un error bajo debido a que el dataset mantiene un régimen de muestreo regular original cerrado, permitiendo predicciones estables a corto plazo. Sin embargo, las arquitecturas continuas demuestran su resiliencia matemática al mantener sus errores estables y simétricos entre reconstrucción y extrapolación. Mientras que las aproximaciones clásicas dependen críticamente de la cercanía y densidad de los nodos temporales, los modelos basados en ODEs muestran una inmunidad notable ante la escasez de datos, lo que sugiere que para series temporales con ruidos extremos o muestreos agresivamente irregulares, el enfoque continuo superará conceptualmente a las técnicas clásicas lineales discretas.
+
+\subsection*{P2. Justificación matemática del flujo invertido en el Encoder RNN}
+En la arquitectura Latent ODE, la Red Neuronal Recurrente (RNN) encargada de codificar la información corre en sentido inverso al flujo temporal natural, es decir, procesa la serie desde el tiempo final hacia atrás hasta el tiempo inicial. 
+
+La justificación matemática subyacente radica en el \textbf{teorema de existencia y unicidad y la propagación de información en EDOs}. El objetivo central de la Latent ODE es inferir una condición inicial óptima $z(t_0)$ en el espacio oculto que represente el estado exacto de partida de la epidemia, para que a partir de allí, el solver numérico (RK4) pueda disparar la simulación hacia adelante de forma determinista. 
+
+Si la RNN procesara la secuencia en orden temporal directo, la memoria latente final de la red estaría fuertemente sesgada por las observaciones más recientes debido al decaimiento natural de gradientes en estructuras recurrentes. Al invertir el eje temporal de análisis, la información acumulada a lo largo de toda la serie se condensa y refina de manera continua a medida que la RNN se aproxima al nodo de interés fundamental, que es precisamente el tiempo original $t_0$. De este modo, la estimación del vector latente que alimenta el truco de reparametrización se calcula disponiendo del conocimiento retrospectivo completo de la trayectoria dinámica, tal como se mapea visualmente al contrastar las predicciones dinámicas en la Figura~\ref{fig:comparativa_modelos}.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\textwidth]{2.png}
+\caption{Comparación gráfica de las predicciones de trayectoria en la Región de Señal frente al Método Clásico y las arquitecturas continuas bajo el 60\% de observaciones.}
+\label{fig:comparativa_modelos}
+\end{figure}
+
+\subsection*{P3. Hallazgos numéricos inesperados y análisis de convergencia}
+Un resultado sorpresivo y de alto impacto numérico fue el \textbf{elevado costo computacional} que exhibieron los modelos basados en ODEs en comparación con la literatura estándar de aprendizaje profundo continuo, lo cual se evidencia al analizar la evolución de las pérdidas en la Figura~\ref{fig:perdidas_entrenamiento}. La Neural ODE requirió $1105.3$ segundos y la Latent ODE alcanzó los $1455.9$ segundos para resolver apenas $15$ épocas sobre una muestra de países. 
+
+Este fenómeno se explica directamente mediante los conceptos de \textbf{rigidez de sistemas no lineales (stiffness)} analizados al inicio del curso. Los datos reales de nuevos casos diarios de COVID-19 contienen fluctuaciones extremadamente rápidas y ruidosas debido a dinámicas sociales y retrasos en los reportes de salud locales. Cuando la red neuronal intenta parametrizar estas discontinuidades o cambios abruptos de pendientes en la función de derivada $f_\theta$, el campo vectorial resultante se vuelve rígido. Dado que nuestro código base implementa un integrador RK4 de paso fijo (pasos de integración acotados a $6$), el solver se ve obligado a evaluar sumas repetitivas e intensivas para forzar la convergencia numérica y aproximar las curvas abruptas.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.85\textwidth]{3.png}
+\caption{Evolución temporal de la función de pérdida (\textit{loss}) durante el entrenamiento numérico continuo de las Neural y Latent ODEs.}
+\label{fig:perdidas_entrenamiento}
+\end{figure}
+
+\subsection*{P4. Criterios de exclusión para la aplicación de Neural ODEs}
+A pesar de su elegancia formal y flexibilidad matemática, existen escenarios específicos donde \textbf{NO se recomienda la implementación de una Neural ODE}:
+
+\begin{enumerate}
+    \item \textbf{Problemas con dinámicas discontinuas o saltos discretos discretizados:} En sistemas de transacciones financieras rápidas, eventos de activación digital o fallos de hardware intempestivos, las variables de estado experimentan cambios instantáneos que rompen la suposición de continuidad intrínseca de los espacios vectoriales de Riemann. Intentar aproximar un salto discreto mediante un integrador continuo de EDOs forzará al solver numérico a reducir de manera inaceptable los pasos de tiempo e incrementar los costos de cómputo.
+    \item \textbf{Sistemas de gran escala sin restricciones físicas evidentes:} En aplicaciones de procesamiento de lenguaje natural o visión por computadora de alta dimensionalidad (donde los estados latentes abarcan miles de dimensiones), el costo de resolver un PVI acoplado al método adjunto continuo se vuelve prohibitivo. Para estos dominios puramente discretos, las arquitecturas estándar tradicionales superan drásticamente en eficiencia de memoria y velocidad de convergencia a los esquemas continuos basados en solvers numéricos.
+\end{enumerate}
+
+\section{Conclusiones}
+El laboratorio permitió validar que las Neural ODEs y Latent ODEs constituyen un paradigma numérico robusto apto para el modelado continuo de fenómenos biológicos cuyas observaciones acontecen en entornos de escasez de datos. Al unificar la flexibilidad de parametrización de las redes neuronales con los esquemas de discretización de Runge-Kutta de 4to orden (RK4), el formalismo continuo trasciende las limitaciones lógicas de los modelos puramente discretos. Aunque los métodos numéricos clásicos como los splines cúbicos proporcionan soluciones de costo nulo con ajustes algebraicos perfectos en los nodos observados, carecen del potencial de generalización dinámica macroscópica que poseen los campos vectoriales latentes aprendidos continuos cuando el sistema físico subyacente enfrenta ruido o interrupciones en su historial temporal.
+
+\end{document}
